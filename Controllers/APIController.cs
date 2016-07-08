@@ -6,6 +6,7 @@ using Microsoft.WindowsAzure.Storage.Blob;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Configuration;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
@@ -23,7 +24,7 @@ namespace DecisionServicePrivateWeb.Controllers
 
         private const string AuthHeaderName = "auth";
 
-        private static DateTime ModelUpdateTime;
+        public static DateTime ModelUpdateTime = new DateTime(1, 1, 1);
 
         [HttpPost]
         public ActionResult Validate()
@@ -157,6 +158,8 @@ namespace DecisionServicePrivateWeb.Controllers
         [HttpPost]
         public async Task<ActionResult> Reset()
         {
+            var telemetry = new TelemetryClient();
+
             try
             {
                 var token = APIUtil.Authenticate(this.Request, ConfigurationManager.AppSettings[ApplicationMetadataStore.AKAdminToken]);
@@ -181,31 +184,20 @@ namespace DecisionServicePrivateWeb.Controllers
             {
                 return new HttpStatusCodeResult(HttpStatusCode.Unauthorized, ex.Message);
             }
-            catch (Exception ex)
+            catch (WebException ex)
             {
-                new TelemetryClient().TrackException(ex);
-                return new HttpStatusCodeResult(HttpStatusCode.InternalServerError, ex.ToString());
-            }
-        }
-
-        [HttpGet]
-        public async Task<ActionResult> TrainerStatus()
-        {
-            try
-            {
-                using (var wc = new WebClient())
+                telemetry.TrackException(ex);
+                string response;
+                using (var stream = new StreamReader(ex.Response.GetResponseStream()))
                 {
-                    var json = await wc.DownloadStringTaskAsync(ConfigurationManager.AppSettings[ApplicationMetadataStore.AKTrainerURL] + "/status");
-                    return Content(json, "application/json");
+                    response = await stream.ReadToEndAsync();
                 }
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                return new HttpStatusCodeResult(HttpStatusCode.Unauthorized, ex.Message);
+
+                return new HttpStatusCodeResult(HttpStatusCode.InternalServerError, ex.ToString() + " " + response);
             }
             catch (Exception ex)
             {
-                new TelemetryClient().TrackException(ex);
+                telemetry.TrackException(ex);
                 return new HttpStatusCodeResult(HttpStatusCode.InternalServerError, ex.ToString());
             }
         }

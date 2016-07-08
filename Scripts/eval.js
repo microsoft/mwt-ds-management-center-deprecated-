@@ -1,7 +1,7 @@
 ﻿$(function () {
     $.ajaxSetup({ cache: false });
 
-    windowType = '3h';
+    windowType = '6d';
 
     function updateDataD3(baseEvalAddress, chartId) {
         d3.selectAll(".nvtooltip").remove();
@@ -26,16 +26,31 @@
                 chart.xAxis.axisLabel("Time");
                 chart.yAxis.axisLabel("Average Reward");
 
-                if (response == null) {
-                    response = [];
+                if (response == null || response.Data == null) {
+                    response = { Data: [] };
+                }
+                else {
+                    if (response.DataError) {
+                        $('#eval-chart-status').text(response.DataError);
+                    }
+                    $("#statusTrainer").text(response.TrainerStatus + " (Last updated at: " + moment().format('MMMM Do YYYY, h:mm:ss a') + ")");
+                    if ($('#statusModel').length) {
+                        // TODO: refactor
+                        modelTime = new Date(parseInt(response.ModelUpdateTime.substr(6)));
+                        modelTimeMessage = 'Latest model obtained at: ' + moment(modelTime).format('MMMM Do YYYY, h:mm:ss a');
+                        if (modelTime.getFullYear() <= 1) {
+                            modelTimeMessage = ''
+                        }
+                        $("#statusModel").text(modelTimeMessage);
+                    }
                 }
                 d3.select('#' + chartId + ' svg')
-                    .datum(response)
+                    .datum(response.Data)
                     .call(chart);
 
                 nv.utils.windowResize(chart.update);
 
-                $('#eval-chart-status').text('Graph Updated At: ' + new Date($.now()));
+                $('#eval-chart-status').text('Graph updated at: ' + moment().format('MMMM Do YYYY, h:mm:ss a'));
 
                 return chart;
             });
@@ -64,6 +79,9 @@
 
     $('#eval-window-filter').on('change', function () {
         windowType = this.value;
+        if ($('#window-size').length) {
+            $('#window-size').text(windowType);
+        }
         updateChart();
     });
 })

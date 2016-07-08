@@ -6,6 +6,7 @@ using Microsoft.Research.MultiWorldTesting.Contract;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Configuration;
@@ -29,6 +30,8 @@ namespace DecisionServicePrivateWeb.Controllers
 
         const string SKClientSettings = "ClientSettings";
         const string SKExtraSettings = "ExtraSettings";
+
+        const string DefaultEvalWindow = "6d";
 
         [HttpGet]
         public ActionResult Index()
@@ -204,13 +207,13 @@ namespace DecisionServicePrivateWeb.Controllers
                 return RedirectToAction("Index");
             }
 
-            return View(new EvaluationViewModel { WindowFilters = new List<string>(GetEvalFilterWindowTypes()), SelectedFilter = "3h" });
+            return View(new EvaluationViewModel { WindowFilters = new List<string>(GetEvalFilterWindowTypes()), SelectedFilter = DefaultEvalWindow });
         }
 
         [HttpGet]
         [AllowAnonymous]
         [NoCache]
-        public ActionResult EvalJson(string windowType = "3h", int maxNumPolicies = 5)
+        public ActionResult EvalJson(string windowType = DefaultEvalWindow, int maxNumPolicies = 5)
         {
             if (!IsAuthenticated(Session))
             {
@@ -223,17 +226,41 @@ namespace DecisionServicePrivateWeb.Controllers
         [HttpGet]
         [AllowAnonymous]
         [NoCache]
-        public ActionResult EvalJsonAPI(string userToken, string windowType = "3h", int maxNumPolicies = 5)
+        public ActionResult EvalJsonAPI(string userToken, string windowType = DefaultEvalWindow, int maxNumPolicies = 5)
         {
             if (userToken != ConfigurationManager.AppSettings[ApplicationMetadataStore.AKWebServiceToken])
             {
                 return new HttpStatusCodeResult(HttpStatusCode.Unauthorized, "A valid token must be specified.");
             }
 
-            return GetEvalData(windowType, maxNumPolicies);
+            string trainerStatus = string.Empty;
+            try
+            {
+                using (var wc = new TimeoutWebClient())
+                {
+                    var trainerStatusJson = wc.DownloadString(ConfigurationManager.AppSettings[ApplicationMetadataStore.AKTrainerURL] + "/status");
+                    JToken jtoken = JObject.Parse(trainerStatusJson);
+                    int numLearnedExamples = (int)jtoken.SelectToken("Stage2_Learn_Total");
+                    trainerStatus = $"Trainer OK. Total learned examples: {numLearnedExamples}";
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ex.Message.Contains("Unable to connect to the remote server"))
+                {
+                    trainerStatus = "Please wait as trainer has not started yet";
+                }
+                else
+                {
+                    new TelemetryClient().TrackException(ex);
+                    trainerStatus = "Error getting trainer status, check Application Insights for more details.";
+                }
+            }
+
+            return GetEvalData(windowType, maxNumPolicies, trainerStatus);
         }
 
-        private ActionResult GetEvalData(string windowType, int maxNumPolicies)
+        private ActionResult GetEvalData(string windowType, int maxNumPolicies, string trainerStatus = null)
         {
             try
             {
@@ -241,6 +268,10 @@ namespace DecisionServicePrivateWeb.Controllers
                 var regex = new Regex(policyRegex);
 
                 var evalContainer = (CloudBlobContainer)Session[SKEvalContainer];
+                if (!evalContainer.Exists())
+                {
+                    return Json(new { DataError = "No evaluation data detected", TrainerStatus = trainerStatus }, JsonRequestBehavior.AllowGet);
+                }
                 var evalBlobs = evalContainer.ListBlobs(useFlatBlobListing: true);
                 var evalData = new Dictionary<string, EvalD3>();
                 foreach (var evalBlob in evalBlobs)
@@ -280,13 +311,16 @@ namespace DecisionServicePrivateWeb.Controllers
                         }
                     }
                 }
-                
 
-                return Json(evalData.Values.Select(a => new { key = GetDemoPolicyName(a.key), values = a.values.Select(v => new object[] { v.Key, v.Value }) }), JsonRequestBehavior.AllowGet);
+                var evalDataD3 = evalData.Values.Select(a => new { key = GetDemoPolicyName(a.key), values = a.values.Select(v => new object[] { v.Key, v.Value }) });
+
+                return Json(new { Data = evalDataD3, TrainerStatus = trainerStatus, ModelUpdateTime = APIController.ModelUpdateTime }, JsonRequestBehavior.AllowGet);
             }
             catch (Exception ex)
             {
-                return new HttpStatusCodeResult(HttpStatusCode.InternalServerError, $"Unable to load evaluation result: {ex.ToString()}");
+                new TelemetryClient().TrackException(ex);
+
+                return Json(new { DataError = "Unable to load evaluation result", TrainerStatus = trainerStatus, ModelUpdateTime = APIController.ModelUpdateTime }, JsonRequestBehavior.AllowGet);
             }
         }
 
@@ -313,13 +347,13 @@ namespace DecisionServicePrivateWeb.Controllers
             switch (policyName)
             {
                 case "Constant Policy 1":
-                    return "AI Article";
+                    return "AI article (predicted)";
                 case "Constant Policy 2":
-                    return "Federal Reserve Article";
+                    return "Federal Reserve article (predicted)";
                 case "Deployed Policy":
-                    return "Offline Policy";
+                    return "Current policy (actual)";
                 case "Latest Policy":
-                    return "Online Policy";
+                    return "Current policy (predicted)";
                 default:
                     return policyName;
             }
@@ -327,19 +361,20 @@ namespace DecisionServicePrivateWeb.Controllers
 
         private static string[] GetEvalFilterWindowTypes()
         {
-            return new string[] { "1m", "5m", "20m", "1h", "3h" };
+            return new string[] { "1m", "1h", "1d", "6d" };
         }
 
         private SimulationViewModel SimulationView()
         {
             var clientSettingsBlob = (CloudBlockBlob)Session[SKClientSettingsBlob];
             var clientApp = JsonConvert.DeserializeObject<ApplicationClientMetadata>(clientSettingsBlob.DownloadText());
-            
+
             return new SimulationViewModel
             {
+                Password = ConfigurationManager.AppSettings[ApplicationMetadataStore.AKPassword],
                 WebServiceToken = ConfigurationManager.AppSettings[ApplicationMetadataStore.AKWebServiceToken],
                 TrainerToken = ConfigurationManager.AppSettings[ApplicationMetadataStore.AKAdminToken],
-                EvaluationView = new EvaluationViewModel { WindowFilters = new List<string>(GetEvalFilterWindowTypes()), SelectedFilter = "3h" },
+                EvaluationView = new EvaluationViewModel { WindowFilters = new List<string>(GetEvalFilterWindowTypes()), SelectedFilter = DefaultEvalWindow },
                 TrainerArguments = clientApp.TrainArguments
             };
         }
